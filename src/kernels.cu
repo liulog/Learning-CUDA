@@ -205,7 +205,7 @@ __global__ void flashAttnKernel(
                 bool valid = q_valid && (k_pos < src_seq_len);
                 if (!valid) // Bound check
                     sum = -INFINITY;
-                
+
                 /********************************************************************************
                  * Note: I think this condition has error !!!
                  * it should be k_pos > q_row + src_seq_len - target_seq_len, considering kvcache
@@ -317,23 +317,31 @@ void flashAttention(const std::vector<T> &h_q, const std::vector<T> &h_k,
      ******************************************************************/
 
     // TODO: Dynamic shared memory size: Br*Dh + 2*Bc*Dh + Br*Bc floats
-    // Bc = ceil(M/4d), Br = min(Bc, d)
-    int Br = 16, Bc = 16;
-
     int max_smem = 0;
     cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlock, 0);
 
-    // int Bc = (max_smem + 4*head_dim - 1) / (4 * head_dim);  // ceil(M / (4*d))
-    // int Br = std::min(Br, head_dim);
+    int Bc = 256, Br = 256;
+    int smem_bytes;
+    smem_bytes = (Br * head_dim + 2 * Bc * head_dim + Br * Bc) * sizeof(float);
+    while (smem_bytes >= max_smem)
+    {
+        Br -= 16;
+        Bc -= 16;
+        smem_bytes = (Br * head_dim + 2 * Bc * head_dim + Br * Bc) * sizeof(float);
+    }
+    if (Br == 0 || Bc == 0)
+    {
+        throw std::runtime_error("Shared memory isn't enough for this configuration.");
+    }
+    // std::cout << "Br: " << Br << ", Bc: " << Bc << ", smem_bytes: " << smem_bytes << std::endl;
+    // std::cout << "Max Shared Memory: " << max_smem << std::endl;
 
-    const int Tr = std::ceil((float)(target_seq_len) / Br);
     const int Tc = std::ceil((float)(src_seq_len) / Bc);
+    const int Tr = std::ceil((float)(target_seq_len) / Br);
 
     // Calculate SRAM size needed per block, Q + K + V + S
-    int smem_bytes = (Br * head_dim + 2 * Bc * head_dim + Br * Bc) * sizeof(float);
     if (smem_bytes > max_smem)
     {
-        fprintf(stderr, "[FlashAttention] Requested shared mem %d > max %d. Reduce Br/Bc or Dh.\n", smem_bytes, max_smem);
         CUDA_CHECK(cudaFree(d_q));
         CUDA_CHECK(cudaFree(d_k));
         CUDA_CHECK(cudaFree(d_v));
